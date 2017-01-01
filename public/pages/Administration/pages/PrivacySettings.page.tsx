@@ -1,0 +1,102 @@
+import React from "react"
+import { Toggle, Form, Field } from "@fider/components"
+import { actions, notify, Fider } from "@fider/services"
+import { AdminBasePage } from "@fider/pages/Administration/components/AdminBasePage"
+
+export interface PrivacySettingsPageState {
+  isPrivate: boolean
+  isFeedEnabled: boolean
+  isModerationEnabled: boolean
+  isSignUpDisabled: boolean
+}
+
+export default class PrivacySettingsPage extends AdminBasePage<any, PrivacySettingsPageState> {
+  public id = "p-admin-privacy"
+  public name = "privacy"
+  public title = "Privacy"
+  public subtitle = "Manage your site's privacy"
+
+  constructor(props: any) {
+    super(props)
+
+    this.state = {
+      isPrivate: Fider.session.tenant.isPrivate,
+      isFeedEnabled: Fider.session.tenant.isFeedEnabled,
+      isModerationEnabled: Fider.session.tenant.isModerationEnabled,
+      isSignUpDisabled: Fider.session.tenant.isSignUpDisabled,
+    }
+  }
+
+  private updatePrivacySettings = async (changes: Partial<PrivacySettingsPageState>) => {
+    const settings = { ...this.state, ...changes }
+    this.setState(
+      {
+        ...settings,
+        isFeedEnabled: settings.isPrivate ? false : settings.isFeedEnabled, // Disable feed if site is private
+      },
+      async () => {
+        const response = await actions.updateTenantPrivacy(this.state)
+        if (response.ok) {
+          notify.success("Your privacy settings have been saved.")
+        }
+      }
+    )
+  }
+
+  private privacyToggle = async (active: boolean) => {
+    this.updatePrivacySettings({ isPrivate: active })
+  }
+
+  private atomFeedToggle = async (enabled: boolean) => {
+    this.updatePrivacySettings({ isFeedEnabled: enabled })
+  }
+
+  private moderationToggle = async (enabled: boolean) => {
+    this.updatePrivacySettings({ isModerationEnabled: enabled })
+  }
+
+  private signUpDisabledToggle = async (disabled: boolean) => {
+    this.updatePrivacySettings({ isSignUpDisabled: disabled })
+  }
+
+  public content() {
+    return (
+      <Form>
+        <Field label="Private Board">
+          <Toggle disabled={!Fider.session.user.isAdministrator} active={this.state.isPrivate} onToggle={this.privacyToggle} />
+          <p className="text-muted mt-1">
+            A private board prevents unauthenticated users from viewing or interacting with its content. <br /> When enabled, only already registered users,
+            invited users and users from trusted OAuth providers will have access to this board. Disables the feed feature.
+          </p>
+        </Field>
+        <Field label="Disable Sign-ups">
+          <Toggle
+            disabled={!Fider.session.user.isAdministrator || this.state.isPrivate}
+            active={this.state.isPrivate || this.state.isSignUpDisabled}
+            onToggle={this.signUpDisabledToggle}
+          />
+          <p className="text-muted mt-1">
+            Prevents visitors from creating a new account on their own. The board stays publicly visible. <br /> When enabled, only already registered users,
+            invited users and users from trusted OAuth providers can sign in. Private boards always have sign-ups disabled.
+          </p>
+        </Field>
+        <Field label="ATOM Feed">
+          <Toggle disabled={!Fider.session.user.isAdministrator || this.state.isPrivate} active={this.state.isFeedEnabled} onToggle={this.atomFeedToggle} />
+          <p className="text-muted mt-1">
+            This feature lets users access this board via a feed reader. <br /> When enabled, the board makes its posts and comments available using the ATOM
+            format. Links to feeds and autodiscovery metadata are shown on the board.
+          </p>
+        </Field>
+        {Fider.session.tenant.isPro && (
+          <Field label="Content Moderation">
+            <Toggle disabled={!Fider.session.user.isAdministrator} active={this.state.isModerationEnabled} onToggle={this.moderationToggle} />
+            <p className="text-muted mt-1">
+              When enabled, new posts and comments will require approval from an administrator before being visible to other users. <br />
+              Content creators can see their own unmoderated content, but it will be hidden from other users until approved.
+            </p>
+          </Field>
+        )}
+      </Form>
+    )
+  }
+}

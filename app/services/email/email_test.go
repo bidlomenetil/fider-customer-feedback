@@ -1,0 +1,243 @@
+package email_test
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/getfider/fider/app/models/dto"
+	"github.com/getfider/fider/app/services/email"
+
+	. "github.com/getfider/fider/app/pkg/assert"
+)
+
+func TestRenderMessage_SubjectUnescapesHTMLEntities(t *testing.T) {
+	RegisterT(t)
+
+	// Reproducer for the issue where characters like '+', '"', '&', '<', '>'
+	// in the rendered subject ended up as their numeric HTML entities
+	// (e.g. "&#43;", "&#34;") because the subject is rendered through
+	// html/template along with the body. SMTP headers are plain text and
+	// must contain the literal characters.
+	message := email.RenderMessage(context.Background(), "echo_test", email.NoReply, dto.Props{
+		"name": `Encontrar+se "quoted" & <tagged>`,
+	})
+	Expect(message.Subject).Equals(`Message to: Encontrar+se "quoted" & <tagged>`)
+}
+
+func TestRenderMessage_SubjectKeepsLeadingCharacters(t *testing.T) {
+	RegisterT(t)
+
+	message := email.RenderMessage(context.Background(), "invite_email", email.NoReply, dto.Props{
+		"subject": "subscribe to our feedback site",
+	})
+	Expect(message.Subject).Equals("subscribe to our feedback site")
+}
+
+func TestRenderMessage_EscapesPlainTextParams(t *testing.T) {
+	RegisterT(t)
+
+	// User and tenant controlled values are interpolated into translated
+	// strings that are rendered as raw HTML, so they must be HTML-escaped
+	// (not stripped) before interpolation.
+	raw := "<b>x</b> & <3"
+	escaped := "&lt;b&gt;x&lt;/b&gt; &amp; &lt;3"
+
+	testCases := []struct {
+		template string
+		params   dto.Props
+		expected int
+	}{
+		{"new_post", dto.Props{"userName": raw, "title": raw}, 2},
+		{"new_comment", dto.Props{"messageLocaleString": "email.new_comment.text", "userName": raw, "title": raw}, 2},
+		{"new_comment", dto.Props{"messageLocaleString": "email.new_mention.text", "userName": raw, "title": raw}, 2},
+		{"change_status", dto.Props{"title": raw, "status": raw}, 2},
+		{"change_status", dto.Props{"title": raw, "duplicate": "<a href='#'>original</a>"}, 1},
+		{"delete_post", dto.Props{"title": raw}, 1},
+		{"signin_email", dto.Props{"siteName": raw, "link": ""}, 1},
+		{"delete_account_requested", dto.Props{"tenantName": raw, "scheduledAt": raw, "cancelLink": ""}, 2},
+		{"delete_account_completed", dto.Props{"tenantName": raw, "subdomain": raw}, 2},
+		{"change_emailaddress_email", dto.Props{"name": raw, "oldEmail": raw, "newEmail": raw, "link": ""}, 3},
+	}
+
+	for _, testCase := range testCases {
+		message := email.RenderMessage(context.Background(), testCase.template, email.NoReply, testCase.params)
+		Expect(strings.Count(message.Body, escaped)).Equals(testCase.expected)
+		Expect(strings.Contains(message.Body, "<b>")).IsFalse()
+	}
+}
+
+func TestRenderMessage(t *testing.T) {
+	RegisterT(t)
+
+	message := email.RenderMessage(context.Background(), "echo_test", email.NoReply, dto.Props{
+		"name": "Fider",
+	})
+	Expect(message.Subject).Equals("Message to: Fider")
+	Expect(message.Body).Equals(`<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+		<meta name="viewport" content="width=device-width">
+		<meta http-equiv="X-UA-Compatible" content="IE=edge">
+		<style>
+			.user-content {
+				text-align: left;
+				padding: 20px;
+				margin: 10px;
+				border-radius: 5px;
+				color: #1c262d;
+				border: 1px solid #E0E0E0;
+				min-width: 320px;
+				max-width: 660px;
+				overflow-wrap: break-word;
+				word-break: break-word;
+				table-layout: fixed;
+				box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+
+				pre:has(code) {
+					white-space: break-spaces;
+				}
+			}
+		</style>
+	</head>
+	<body bgcolor="#F7F7F7" style="font-size:18px">
+		<table width="100%" bgcolor="#F7F7F7" cellpadding="0" cellspacing="0" border="0" style="text-align:center;font-size:18px;">
+			<tr>
+				<td height="40">&nbsp;</td>
+			</tr>
+			
+			<tr>
+				<td align="center">
+					<table class="user-content" bgcolor="#FFFFFF" cellpadding="0" cellspacing="0" border="0" style="text-align:left;padding:20px;margin:10px;border-radius:5px;color:#1c262d;border:1px solid #E0E0E0;min-width:320px;max-width:660px;overflow-wrap:break-word;word-break:break-word;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+						
+Hello World Fider!
+
+					</table>
+				</td>
+			</tr>
+			
+			<tr>
+				<td height="20">&nbsp;</td>
+			</tr>
+			<tr>
+				<td style="padding:0 20px;">
+					<span style="color:#666;font-size:12px">This email was sent from a notification-only address that cannot accept incoming email. Please do not reply to this message.</span>
+				</td>
+			</tr>
+			
+			<tr>
+				<td height="40">&nbsp;</td>
+			</tr>
+		</table>
+	</body>
+</html>`)
+}
+
+func TestCanSendTo(t *testing.T) {
+	RegisterT(t)
+
+	testCases := []struct {
+		allowlist string
+		blocklist string
+		input     []string
+		canSend   bool
+	}{
+		{
+			allowlist: "(^.+@fider.io$)|(^darthvader\\.fider(\\+.*)?@gmail\\.com$)",
+			blocklist: "",
+			input:     []string{"me@fider.io", "me+123@fider.io", "darthvader.fider@gmail.com", "darthvader.fider+434@gmail.com"},
+			canSend:   true,
+		},
+		{
+			allowlist: "(^.+@fider.io$)|(^darthvader\\.fider(\\+.*)?@gmail\\.com$)",
+			blocklist: "",
+			input:     []string{"me+123@fider.iod", "me@fidero.io", "darthvader.fidera@gmail.com", "@fider.io"},
+			canSend:   false,
+		},
+		{
+			allowlist: "(^.+@fider.io$)|(^darthvader\\.fider(\\+.*)?@gmail\\.com$)",
+			blocklist: "(^.+@fider.io$)",
+			input:     []string{"me@fider.io"},
+			canSend:   true,
+		},
+		{
+			allowlist: "",
+			blocklist: "(^.+@fider.io$)",
+			input:     []string{"me@fider.io", "abc@fider.io"},
+			canSend:   false,
+		},
+		{
+			allowlist: "",
+			blocklist: "(^.+@fider.io$)",
+			input:     []string{"me@fider.com", "abc@fiderio.io"},
+			canSend:   true,
+		},
+		{
+			allowlist: "",
+			blocklist: "",
+			input:     []string{"me@fider.io"},
+			canSend:   true,
+		},
+		{
+			allowlist: "",
+			blocklist: "",
+			input:     []string{"", " "},
+			canSend:   false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		email.SetAllowlist(testCase.allowlist)
+		email.SetBlocklist(testCase.blocklist)
+		for _, input := range testCase.input {
+			Expect(email.CanSendTo(input)).Equals(testCase.canSend)
+		}
+	}
+}
+
+func TestRecipient_String(t *testing.T) {
+	RegisterT(t)
+
+	testCases := []struct {
+		name     string
+		email    string
+		expected string
+	}{
+		{
+			name:     "Jon",
+			email:    "jon@got.com",
+			expected: `"Jon" <jon@got.com>`,
+		},
+		{
+			name:     "Snow, Jon",
+			email:    "jon@got.com",
+			expected: `"Snow, Jon" <jon@got.com>`,
+		},
+		{
+			name:     "",
+			email:    "jon@got.com",
+			expected: "<jon@got.com>",
+		},
+		{
+			name:     "Jon's Home Account",
+			email:    "jon@got.com",
+			expected: `"Jon's Home Account" <jon@got.com>`,
+		},
+		{
+			name:     `Jon "Great" Snow`,
+			email:    "jon@got.com",
+			expected: `"Jon \"Great\" Snow" <jon@got.com>`,
+		},
+		{
+			name:     "Jon",
+			email:    "",
+			expected: "",
+		},
+	}
+
+	for _, testCase := range testCases {
+		r := dto.NewRecipient(testCase.name, testCase.email, dto.Props{})
+		Expect(r.String()).Equals(testCase.expected)
+	}
+}
